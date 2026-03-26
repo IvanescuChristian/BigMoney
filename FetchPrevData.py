@@ -196,6 +196,7 @@ def save_all_hourly(date_str):
     def try_on_proxy(coin_id):
         nonlocal prx_i, total_prx_fail, proxy_coin_count
         tries = 0
+        no_prices_count = 0
         while tries < MAX_PRX_TRIES_PER_COIN:
             if needs_proxy_refresh():
                 do_proxy_refresh()
@@ -235,11 +236,23 @@ def save_all_hourly(date_str):
             else:
                 reason = err or "unknown"
                 print(f" FAIL ({reason})")
-                if reason.startswith("cached") or reason == "rate_limited":
-                    # This proxy is burnt — move on, don't count as tries
+
+                if reason == "no_prices":
+                    no_prices_count += 1
+                    if no_prices_count >= 2:
+                        # 2x no_prices = coin problem, NOT proxy problem
+                        # Keep current proxy, queue coin for IP retry
+                        print(f"    [NO_DATA] {coin_id} — 2x no_prices, coin problem -> queue")
+                        return False  # proxy stays, coin goes to retry_q
+                    # First no_prices: try next proxy, maybe it was that proxy
+                    prx_i += 1
+                    proxy_coin_count = 0
+                    tries += 1
+                elif reason.startswith("cached") or reason == "rate_limited":
                     prx_i += 1
                     proxy_coin_count = 0
                     proxy_fingerprints.pop(px, None)
+                    # Don't count as tries — proxy problem
                 else:
                     prx_i += 1
                     proxy_coin_count = 0

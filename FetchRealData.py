@@ -261,6 +261,7 @@ def run():
     def try_proxy(d, c):
         nonlocal prx_i, proxy_coin_count
         tries = 0
+        no_prices_count = 0
         while tries < MAX_PRX_TRIES_PER_COIN:
             if needs_refresh():
                 do_refresh()
@@ -291,8 +292,18 @@ def run():
             else:
                 reason = err or "unknown"
                 print(f" FAIL ({reason})")
-                if reason.startswith("cached") or reason == "rate_limited":
-                    # Proxy is burnt, skip it immediately
+
+                if reason == "no_prices":
+                    no_prices_count += 1
+                    if no_prices_count >= 2:
+                        # 2x no_prices = coin problem, keep proxy, queue coin
+                        print(f"    [NO_DATA] {c}({d}) — 2x no_prices, coin problem -> queue")
+                        return False
+                    # First: maybe proxy issue, try next
+                    prx_i += 1
+                    proxy_coin_count = 0
+                    tries += 1
+                elif reason.startswith("cached") or reason == "rate_limited":
                     prx_i += 1
                     proxy_coin_count = 0
                     proxy_fingerprints.pop(px, None)
