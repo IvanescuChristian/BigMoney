@@ -136,22 +136,24 @@ COINGECKO_TO_SANTIMENT = {
     "chainlink": "chainlink", "monero": "monero", "stellar": "stellar",
     "dai": "multi-collateral-dai", "litecoin": "litecoin",
     "avalanche-2": "avalanche", "hedera-hashgraph": "hedera-hashgraph",
-    "sui": "sui", "shiba-inu": "shiba-inu",
-    "the-open-network": "the-open-network", "polkadot": "polkadot-new",
+    "sui": "sui", "shiba-inu": "shiba-inu", "polkadot": "polkadot-new",
     "uniswap": "uniswap", "near": "near-protocol", "aave": "aave",
     "bittensor": "bittensor", "okb": "okb", "zcash": "zcash",
     "ethereum-classic": "ethereum-classic", "mantle": "mantle",
     "pax-gold": "pax-gold", "tether-gold": "tether-gold",
-    "pi-network": "pinetwork", "internet-computer": "internet-computer",
+    "internet-computer": "internet-computer",
     "crypto-com-chain": "crypto-com-coin", "paypal-usd": "paypal-usd",
     "kaspa": "kaspa", "pepe": "pepe", "aptos": "aptos",
-    "whitebit": "whitebit-coin", "ondo-finance": "ondo-finance",
+    "ondo-finance": "ondo-finance", "ethena-usde": "ethena-usde",
+    "jito-staked-sol": "jito-staked-sol", "usds": "usds",
+    "weth": "weth", "wrapped-eeth": "wrapped-eeth",
 }
+
+RATE_LIMIT_WAIT = 1860  # 31 min
 
 def fetch_real_social(coin_id, date_str):
     if not HAS_SAN:
         return None
-    # Use hardcoded slug first
     slug = COINGECKO_TO_SANTIMENT.get(coin_id)
     if not slug:
         return None
@@ -162,10 +164,23 @@ def fetch_real_social(coin_id, date_str):
                        interval="1d")
         if not data.empty and 'value' in data.columns:
             return float(data['value'].iloc[0])
-    except:
-        pass
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "Rate Limit" in err_str:
+            print(f"\n    [RATE LIMITED] Waiting {RATE_LIMIT_WAIT//60} min...")
+            time.sleep(RATE_LIMIT_WAIT)
+            # Retry once
+            try:
+                data = san.get(f"social_volume_total/{slug}",
+                               s_date=f"{date_str}T00:00:00Z",
+                               e_date=f"{date_str}T23:59:59Z",
+                               interval="1d")
+                if not data.empty and 'value' in data.columns:
+                    return float(data['value'].iloc[0])
+            except:
+                pass
     finally:
-        time.sleep(0.5)
+        time.sleep(1.5)
     return None
 
 # ── discover predictions ─────────────────────────────────────────────────────
