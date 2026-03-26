@@ -15,3 +15,13 @@ for /L %%i in (1,1,24) do (
     python FetchSpecialData.py 2025-05-!day!
     endlocal
 )
+
+echo.
+echo ============================================================
+echo   DATA COLLECTION DONE — Starting processing pipeline
+echo ============================================================
+
+python FillData.py
+python Predict.py
+python FetchRealData.py
+python Display.py

@@ -1,7 +1,9 @@
 import requests
 import csv
 import os
+import sys
 import time
+import subprocess
 from datetime import datetime, timedelta, timezone
 from collections import deque
 
@@ -9,8 +11,9 @@ COINGECKO_API = "https://api.coingecko.com/api/v3"
 PROXIES_HOME = "proxies.txt"
 MAX_PRX_F = 90
 MAX_PRX_TRIES_PER_COIN = 20   # try max 20 proxies per coin before deferring
-BATCH_SIZE = 5                # how many coins per IP/proxy batch
-IP_COOLDOWN = 60              # seconds between MY_IP batches
+BATCH_SIZE = 5                 # how many coins per IP/proxy batch
+IP_COOLDOWN = 60               # seconds between MY_IP batches
+PROXY_REFRESH_INTERVAL = 600   # 10 minute — refresh proxies
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historical_hourly")
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -21,6 +24,18 @@ def load_proxies_from_txt():
         return []
     with open(PROXIES_HOME, "r") as f:
         return [line.strip() for line in f if line.strip()]
+
+def refresh_proxies():
+    """Run proxy_api.py to get fresh proxies, reload list."""
+    print("\n[PROXY-REFRESH] Running proxy_api.py for fresh proxies...")
+    try:
+        subprocess.run([sys.executable, "proxy_api.py"], check=True,
+                       capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        print(f"[PROXY-REFRESH] proxy_api.py failed: {e}")
+    new_proxies = load_proxies_from_txt()
+    print(f"[PROXY-REFRESH] Reloaded {len(new_proxies)} proxies. Timer reset.\n")
+    return new_proxies
 
 def get_proxy_dict(proxy_url):
     return {"http": proxy_url, "https": proxy_url}
@@ -57,7 +72,6 @@ def fetch_coin_list():
     data = fetch_json(url, params)
     if data:
         return data
-    # fallback: try a few proxies
     for p in load_proxies_from_txt()[:20]:
         data = fetch_json(url, params, p)
         if data:
@@ -86,28 +100,37 @@ def save_all_hourly(date_str):
     print(f"[COINS] Got {len(coin_list)} coins\n")
 
     # queues
-    main_q      = deque(c["id"] for c in coin_list)   # normal order
-    retry_q     = deque()                               # coins that failed on proxy → retry on IP
-    failed_set  = set()                                 # permanently failed
-    results     = {}                                    # coin_id → (prices, volumes)
+    main_q      = deque(c["id"] for c in coin_list)
+    retry_q     = deque()
+    failed_set  = set()
+    results     = {}
 
-    prx_i           = 0          # rotating proxy index
-    last_ip_time    = 0.0        # when we last used MY_IP
-    ip_count        = 0          # how many coins done in current IP window
-    total_prx_fail  = 0
+    prx_i              = 0
+    last_ip_time       = 0.0
+    ip_count           = 0
+    total_prx_fail     = 0
+    proxy_refresh_time = time.time()   # timer for 10-min refresh
+
+    def needs_proxy_refresh():
+        """Refresh when: all proxies exhausted OR 10 min passed."""
+        return (prx_i >= len(proxies)) or \
+               (time.time() - proxy_refresh_time >= PROXY_REFRESH_INTERVAL)
+
+    def do_proxy_refresh():
+        nonlocal proxies, prx_i, proxy_refresh_time
+        proxies = refresh_proxies()
+        prx_i = 0
+        proxy_refresh_time = time.time()
 
     def ip_ready():
-        """Can we use MY_IP right now?"""
         return (time.time() - last_ip_time) >= IP_COOLDOWN or last_ip_time == 0.0
 
     def try_on_ip(coin_id):
-        """Try fetching a coin on MY_IP. Returns True on success."""
         nonlocal last_ip_time, ip_count
         print(f"    {coin_id} | MY_IP...", end="", flush=True)
         p, v = fetch_coin_data(coin_id, date_str)
         if p:
-            pts = len(p)
-            print(f" OK ({pts}pts)")
+            print(f" OK ({len(p)}pts)")
             results[coin_id] = (p, v)
             last_ip_time = time.time()
             ip_count += 1
@@ -119,19 +142,22 @@ def save_all_hourly(date_str):
             return False
 
     def try_on_proxy(coin_id):
-        """Try fetching a coin using proxies (limited tries).
-           Returns True on success, False if should be deferred."""
         nonlocal prx_i, total_prx_fail
         tries = 0
-        while tries < MAX_PRX_TRIES_PER_COIN and prx_i < len(proxies):
+        while tries < MAX_PRX_TRIES_PER_COIN:
+            # refresh daca am epuizat lista sau au trecut 10 min
+            if needs_proxy_refresh():
+                do_proxy_refresh()
+            if prx_i >= len(proxies):
+                break   # refresh-ul n-a adus nimic
+
             px = proxies[prx_i]
             print(f"    [TRY] Proxy #{prx_i+1}: {px}...", end="", flush=True)
             p, v = fetch_coin_data(coin_id, date_str, px)
             if p:
-                pts = len(p)
-                print(f" OK ({pts}pts)")
+                print(f" OK ({len(p)}pts)")
                 results[coin_id] = (p, v)
-                prx_i += 1
+                # NU avansam prx_i — refolosim proxy-ul bun la urm coin
                 return True
             else:
                 print(" FAIL")
@@ -142,10 +168,10 @@ def save_all_hourly(date_str):
 
     # ── main loop ────────────────────────────────────────────────────────
 
-    coin_num  = 0
-    total     = len(main_q)
-    mode      = "ip"            # start on MY_IP
-    ip_count  = 0
+    coin_num = 0
+    total    = len(main_q)
+    mode     = "ip"
+    ip_count = 0
 
     print(f"[START] Mode=MY_IP | {total} coins\n")
 
@@ -154,15 +180,17 @@ def save_all_hourly(date_str):
             print(f"\n[ABORT] Total proxy failures ({total_prx_fail}) hit limit {MAX_PRX_F}.")
             break
 
+        # ── proxy refresh check (in proxy mode) ─────────────────────
+        if mode == "proxy" and needs_proxy_refresh():
+            do_proxy_refresh()
+
         # ── decide mode ──────────────────────────────────────────────
         if mode == "ip" and ip_count >= BATCH_SIZE:
-            # done with IP batch → switch to proxy
             mode = "proxy"
             ip_count = 0
             print(f"[SWITCH] Done {BATCH_SIZE} on MY_IP -> PROXY #{prx_i+1}")
 
         if mode == "proxy" and ip_ready():
-            # cooldown elapsed → switch back to IP for retry_q + remainder
             mode = "ip"
             ip_count = 0
             if retry_q:
@@ -172,7 +200,6 @@ def save_all_hourly(date_str):
 
         # ── IP mode ──────────────────────────────────────────────────
         if mode == "ip":
-            # first drain retry queue on MY_IP
             while retry_q and ip_count < BATCH_SIZE:
                 r_coin = retry_q.popleft()
                 print(f"[RETRY] {r_coin}", end="")
@@ -182,29 +209,23 @@ def save_all_hourly(date_str):
                     print(f"    [DROP] {r_coin} — failed on both proxy & MY_IP")
                 time.sleep(0.3)
 
-            # then fill remaining IP slots from main queue
             while main_q and ip_count < BATCH_SIZE:
                 coin_id = main_q.popleft()
                 coin_num += 1
                 print(f"[{coin_num}/{total}] {coin_id}", end="")
                 ok = try_on_ip(coin_id)
                 if not ok:
-                    # IP fail on a normal coin → put in retry queue
                     retry_q.append(coin_id)
                     print(f"    [QUEUE] {coin_id} -> retry queue")
                 time.sleep(0.3)
-
-            # if we used all IP slots, switch mode (will happen at top of loop)
             continue
 
         # ── proxy mode ───────────────────────────────────────────────
         if mode == "proxy":
             if not main_q and not retry_q:
                 break
-
-            # Check if IP cooldown is ready mid-proxy-batch
             if ip_ready():
-                continue  # will switch to IP at top of loop
+                continue
 
             if main_q:
                 coin_id = main_q.popleft()
@@ -216,23 +237,20 @@ def save_all_hourly(date_str):
                     print(f"    [QUEUE] {coin_id} -> retry queue ({MAX_PRX_TRIES_PER_COIN} proxy fails)")
                 time.sleep(0.3)
             else:
-                # nothing in main_q, waiting for IP cooldown
                 wait = IP_COOLDOWN - (time.time() - last_ip_time)
                 if wait > 0:
                     print(f"[WAIT] {wait:.0f}s for IP cooldown ({len(retry_q)} in retry queue)...")
-                    time.sleep(min(wait, 10))  # sleep in chunks
+                    time.sleep(min(wait, 10))
 
     # ── write CSV ────────────────────────────────────────────────────────
 
     ok_count   = len(results)
     fail_count = len(failed_set)
-    skip_count = total - ok_count - fail_count  # still in queues (if we aborted)
 
     with open(file_path, "w", newline='', encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp_utc", "coin_id", "price_usd", "total_volume_usd"])
 
-        # write in original order
         for coin in coin_list:
             cid = coin["id"]
             if cid not in results:
@@ -248,7 +266,6 @@ def save_all_hourly(date_str):
 
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) < 2:
         print("Usage: python FetchPrevData.py <YYYY-MM-DD>")
     else:

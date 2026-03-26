@@ -30,6 +30,15 @@ for /L %%i in (1,1,%maxDay%) do (
     python FetchSpecialData.py %ym%-!day!
     endlocal
 )
+
+echo.
+echo ============================================================
+echo   DATA COLLECTION DONE — Starting processing pipeline
+echo ============================================================
+
 python FillData.py
+python Predict.py
+python FetchRealData.py
 python Display.py
+
 endlocal
