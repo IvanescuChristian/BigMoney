@@ -24,4 +24,5 @@ echo ============================================================
 python FillData.py
 python Predict.py
 python FetchRealData.py
+python ErrorAnalysis.py
 python Display.py
