@@ -7,38 +7,22 @@ echo.
 
 echo [1/4] Processing historical data (FillData)...
 python FillData.py
-if %ERRORLEVEL% NEQ 0 (
-    echo FAILED at FillData.py
-    pause
-    exit /b 1
-)
+if %ERRORLEVEL% NEQ 0 (echo FAILED at FillData.py & pause & exit /b 1)
 
 echo.
-echo [2/4] Running predictions (Predict)...
+echo [2/4] Running 3-stage predictions (Social + Magnitude + Price)...
 python Predict.py
-if %ERRORLEVEL% NEQ 0 (
-    echo FAILED at Predict.py
-    pause
-    exit /b 1
-)
+if %ERRORLEVEL% NEQ 0 (echo FAILED at Predict.py & pause & exit /b 1)
 
 echo.
-echo [3/4] Fetching real prices + social for comparison (FetchRealData)...
+echo [3/4] Fetching real prices + social for comparison...
 python FetchRealData.py
-if %ERRORLEVEL% NEQ 0 (
-    echo FAILED at FetchRealData.py
-    pause
-    exit /b 1
-)
+if %ERRORLEVEL% NEQ 0 (echo FAILED at FetchRealData.py & pause & exit /b 1)
 
 echo.
-echo [4/4] Analyzing prediction accuracy (ErrorAnalysis)...
+echo [4/4] Analyzing prediction accuracy...
 python ErrorAnalysis.py
-if %ERRORLEVEL% NEQ 0 (
-    echo FAILED at ErrorAnalysis.py
-    pause
-    exit /b 1
-)
+if %ERRORLEVEL% NEQ 0 (echo FAILED at ErrorAnalysis.py & pause & exit /b 1)
 
 echo.
 echo ============================================================

@@ -125,38 +125,34 @@ def fetch_coin_day(coin_id, date_str, proxy_url=None, proxy_fingerprints=None):
     fp = proxy_fingerprints if proxy_fingerprints else {}
     return validate_coingecko_response(data, raw, date_str, coin_id, fp, proxy_url)
 
-# ── Santiment ────────────────────────────────────────────────────────────────
+# ── Santiment (same hardcoded map as FetchSpecialData) ───────────────────────
 
-_slug_cache = None
-
-def get_slug_map():
-    global _slug_cache
-    if _slug_cache is not None:
-        return _slug_cache
-    if not HAS_SAN:
-        return {}
-    try:
-        projects = san.get("projects/all")
-        m = {}
-        for _, p in projects.iterrows():
-            if pd.notna(p.get('name')):
-                m[p['name'].lower()] = p['slug']
-            if pd.notna(p.get('ticker')):
-                m[p['ticker'].lower()] = p['slug']
-        _slug_cache = m
-        print(f"[SANTIMENT] Got {len(m)} slug entries")
-        return m
-    except Exception as e:
-        print(f"[SANTIMENT] slug fetch error: {e}")
-        _slug_cache = {}
-        return {}
+COINGECKO_TO_SANTIMENT = {
+    "bitcoin": "bitcoin", "ethereum": "ethereum", "tether": "tether",
+    "ripple": "ripple", "binancecoin": "binance-coin", "usd-coin": "usd-coin",
+    "solana": "solana", "tron": "tron", "dogecoin": "dogecoin",
+    "cardano": "cardano", "bitcoin-cash": "bitcoin-cash",
+    "hyperliquid": "hyperliquid", "leo-token": "unus-sed-leo",
+    "chainlink": "chainlink", "monero": "monero", "stellar": "stellar",
+    "dai": "multi-collateral-dai", "litecoin": "litecoin",
+    "avalanche-2": "avalanche", "hedera-hashgraph": "hedera-hashgraph",
+    "sui": "sui", "shiba-inu": "shiba-inu",
+    "the-open-network": "the-open-network", "polkadot": "polkadot-new",
+    "uniswap": "uniswap", "near": "near-protocol", "aave": "aave",
+    "bittensor": "bittensor", "okb": "okb", "zcash": "zcash",
+    "ethereum-classic": "ethereum-classic", "mantle": "mantle",
+    "pax-gold": "pax-gold", "tether-gold": "tether-gold",
+    "pi-network": "pinetwork", "internet-computer": "internet-computer",
+    "crypto-com-chain": "crypto-com-coin", "paypal-usd": "paypal-usd",
+    "kaspa": "kaspa", "pepe": "pepe", "aptos": "aptos",
+    "whitebit": "whitebit-coin", "ondo-finance": "ondo-finance",
+}
 
 def fetch_real_social(coin_id, date_str):
     if not HAS_SAN:
         return None
-    slug_map = get_slug_map()
-    processed = coin_id.replace("-", " ")
-    slug = slug_map.get(processed.lower())
+    # Use hardcoded slug first
+    slug = COINGECKO_TO_SANTIMENT.get(coin_id)
     if not slug:
         return None
     try:

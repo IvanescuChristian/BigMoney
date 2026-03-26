@@ -1,197 +1,170 @@
-"""
-FetchSpecialData.py — Extrage Social Volume + Sentiment de la Santiment API.
-GraphQL direct (nu depinde de sanpy). NU blocheaza — max 2 retry per coin apoi skip.
-Nu foloseste proxy (Santiment nu blocheaza per IP la ritmul nostru).
-"""
 import pandas as pd
-import numpy as np
-import requests
+import san
 import sys
-import os
+from datetime import datetime, timedelta
 import time
+import os
+san.ApiConfig.api_key = 'yvib2jijbrcivyfh_uw25dl5mk4qch5mf'
 
-SANTIMENT_GQL = "https://api.santiment.net/graphql"
-SANTIMENT_API_KEY = ""  # Lasa gol pt free tier sau pune key-ul tau
-SLEEP_BETWEEN = 1.5     # Secunde intre requesturi
-MAX_RETRIES = 2          # Max retry per coin (nu 10, nu infinit)
-REQUEST_TIMEOUT = 10     # Secunde timeout per request
+# ── HARDCODED: CoinGecko ID → Santiment slug ────────────────────────────────
+# The dynamic lookup is broken — memecoins overwrite real coins.
+# This map is the source of truth for top 50.
 
-# Manual mapping pt monede problematice
-MANUAL_SLUG_MAP = {
-    'binance-bridged-usdt-bnb-smart-chain': 'tether',
-    'coinbase-wrapped-btc': 'bitcoin',
-    'wrapped-bitcoin': 'bitcoin',
-    'wrapped-eeth': 'ethereum',
-    'wrapped-steth': 'staked-ether',
-    'staked-ether': 'staked-ether',
-    'weth': 'ethereum',
-    'jito-staked-sol': 'solana',
-    'blackrock-usd-institutional-digital-liquidity-fund': None,
-    'ethena-usde': None,
-    'usds': None,
-    'figure-heloc': None,  # Nu exista pe Santiment
+COINGECKO_TO_SANTIMENT = {
+    "bitcoin":           "bitcoin",
+    "ethereum":          "ethereum",
+    "tether":            "tether",
+    "ripple":            "ripple",
+    "binancecoin":       "binance-coin",
+    "usd-coin":          "usd-coin",
+    "solana":            "solana",
+    "tron":              "tron",
+    "dogecoin":          "dogecoin",
+    "cardano":           "cardano",
+    "bitcoin-cash":      "bitcoin-cash",
+    "hyperliquid":       "hyperliquid",
+    "leo-token":         "unus-sed-leo",
+    "chainlink":         "chainlink",
+    "monero":            "monero",
+    "stellar":           "stellar",
+    "dai":               "multi-collateral-dai",
+    "litecoin":          "litecoin",
+    "avalanche-2":       "avalanche",
+    "hedera-hashgraph":  "hedera-hashgraph",
+    "sui":               "sui",
+    "shiba-inu":         "shiba-inu",
+    "the-open-network":  "the-open-network",
+    "polkadot":          "polkadot-new",
+    "uniswap":           "uniswap",
+    "near":              "near-protocol",
+    "aave":              "aave",
+    "bittensor":         "bittensor",
+    "okb":               "okb",
+    "zcash":             "zcash",
+    "ethereum-classic":  "ethereum-classic",
+    "mantle":            "mantle",
+    "pax-gold":          "pax-gold",
+    "tether-gold":       "tether-gold",
+    "pi-network":        "pinetwork",
+    "internet-computer": "internet-computer",
+    "crypto-com-chain":  "crypto-com-coin",
+    "paypal-usd":        "paypal-usd",
+    "kaspa":             "kaspa",
+    "pepe":              "pepe",
+    "aptos":             "aptos",
+    "dogwifcoin":        "dogwifhat",
+    "whitebit":          "whitebit-coin",
+    "ondo-finance":      "ondo-finance",
 }
 
-def gql_request(query):
-    """Trimite GraphQL request la Santiment. Returneaza dict sau None."""
-    headers = {"Content-Type": "application/json"}
-    if SANTIMENT_API_KEY:
-        headers["Authorization"] = f"Apikey {SANTIMENT_API_KEY}"
+def get_dynamic_slug_map():
+    """Fallback: build slug map from Santiment API for coins NOT in hardcoded list."""
     try:
-        resp = requests.post(SANTIMENT_GQL, json={"query": query}, headers=headers, timeout=REQUEST_TIMEOUT)
-        data = resp.json()
-        if 'errors' in data:
-            err = str(data['errors'])[:100]
-            if 'rate limit' in err.lower() or '429' in err:
-                return "RATE_LIMITED"
-            return None
-        return data
-    except requests.exceptions.Timeout:
-        return None
-    except Exception:
-        return None
-
-def build_slug_map():
-    """Construieste CoinGecko ID -> Santiment slug mapping."""
-    print("  Building Santiment slug map...")
-    query = '{ allProjects(minVolume: 0) { slug name ticker } }'
-    data = gql_request(query)
-    if data is None or data == "RATE_LIMITED":
-        print("  [WARN] Could not fetch slug map")
+        projects = san.get("projects/all")
+        slug_map = {}
+        for _, p in projects.iterrows():
+            slug = p.get('slug', '')
+            if not slug:
+                continue
+            # Map by slug itself (safest)
+            slug_map[slug.lower()] = slug
+            # Map by ticker (but DON'T overwrite existing — first wins)
+            ticker = p.get('ticker', '')
+            if pd.notna(ticker) and ticker.lower() not in slug_map:
+                slug_map[ticker.lower()] = slug
+        print(f"  [SANTIMENT] Dynamic map: {len(slug_map)} entries")
+        return slug_map
+    except Exception as e:
+        print(f"  [SANTIMENT] Dynamic map failed: {e}")
         return {}
-    
-    projects = data.get("data", {}).get("allProjects", [])
-    slug_map = {}
-    for p in projects:
-        slug = p.get("slug", "")
-        name = (p.get("name") or "").lower()
-        ticker = (p.get("ticker") or "").lower()
-        if name: slug_map[name] = slug
-        if ticker: slug_map[ticker] = slug
-        if slug: slug_map[slug] = slug
-        slug_map[name.replace(" ", "-")] = slug
-    
-    print(f"  Got {len(slug_map)} slug entries from {len(projects)} projects")
-    return slug_map
 
-def resolve_slug(coin_id, slug_map):
-    """Rezolva CoinGecko coin_id -> Santiment slug."""
-    if coin_id in MANUAL_SLUG_MAP:
-        return MANUAL_SLUG_MAP[coin_id]
-    if coin_id in slug_map:
-        return slug_map[coin_id]
-    cleaned = coin_id.replace("-", " ")
-    if cleaned in slug_map:
-        return slug_map[cleaned]
-    cleaned2 = coin_id.replace("-", "_")
-    if cleaned2 in slug_map:
-        return slug_map[cleaned2]
-    first = coin_id.split("-")[0]
-    if first in slug_map and first not in ("bitcoin", "ethereum", "wrapped"):
-        return slug_map[first]
+
+def resolve_slug(coin_id, dynamic_map):
+    """Resolve CoinGecko coin_id to Santiment slug. Hardcoded first, then dynamic."""
+    # 1. Hardcoded (trusted)
+    if coin_id in COINGECKO_TO_SANTIMENT:
+        return COINGECKO_TO_SANTIMENT[coin_id]
+
+    # 2. Try direct match (coin_id often matches slug)
+    processed = coin_id.replace("-", " ")
+    if coin_id in dynamic_map:
+        return dynamic_map[coin_id]
+
+    # 3. Try processed name
+    if processed.lower() in dynamic_map:
+        return dynamic_map[processed.lower()]
+
     return None
 
-def fetch_metric(slug, date_str, metric_name):
-    """Fetch un metric de la Santiment. Max MAX_RETRIES incercari."""
-    query = """{
-        getMetric(metric: "%s") {
-            timeseriesData(slug: "%s", from: "%sT00:00:00Z", to: "%sT23:59:59Z", interval: "1d") {
-                datetime
-                value
-            }
-        }
-    }""" % (metric_name, slug, date_str, date_str)
-    
-    for attempt in range(MAX_RETRIES):
-        result = gql_request(query)
-        if result == "RATE_LIMITED":
-            wait = (attempt + 1) * 5
-            print(f" rate-limited, wait {wait}s", end="")
-            time.sleep(wait)
-            continue
-        if result is None:
-            continue
-        ts_data = result.get("data", {}).get("getMetric", {}).get("timeseriesData", [])
-        if ts_data:
-            return ts_data[0].get("value", None)
+
+def get_social_volume(coin_id, date_str, slug):
+    """Fetch daily social volume from Santiment."""
+    s_date = f"{date_str}T00:00:00Z"
+    e_date = f"{date_str}T23:59:59Z"
+    try:
+        data = san.get(f"social_volume_total/{slug}",
+                       s_date=s_date, e_date=e_date, interval="1d")
+        if not data.empty and 'value' in data.columns:
+            sv = float(data['value'].iloc[0])
+            return sv
         return None
-    return None
+    except Exception as e:
+        print(f"    [ERROR] {coin_id} ({slug}): {e}")
+        return None
+    finally:
+        time.sleep(1)
+
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python FetchSpecialData.py <YYYY-MM-DD>")
         sys.exit(1)
-    
+
     target_date = sys.argv[1]
-    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historical_hourly", f"{target_date}.csv")
-    
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "historical_hourly", f"{target_date}.csv")
+
+    print(f"Loaded: {csv_path}")
     try:
         df = pd.read_csv(csv_path)
-        print(f"Loaded: {csv_path}")
     except FileNotFoundError:
-        print(f"Error: {csv_path} not found.")
+        print(f"Error: {csv_path} not found")
         sys.exit(1)
-    
+
     if 'coin_id' not in df.columns:
-        print("Error: CSV must have 'coin_id' column.")
+        print("Error: no coin_id column")
         sys.exit(1)
-    
-    distinct_coins = df['coin_id'].unique()
-    print(f"Found {len(distinct_coins)} coins\n")
-    
-    slug_map = build_slug_map()
-    
+
+    coins = df['coin_id'].unique()
+    print(f"Found {len(coins)} coins\n")
+
+    print("  Building Santiment slug map...")
+    dynamic_map = get_dynamic_slug_map()
+
+    sv_col = f"social_volume_{target_date.replace('-', '_')}"
     sv_data = {}
-    sent_data = {}
-    found = 0; skipped = 0; no_data = 0
-    
-    for i, coin in enumerate(distinct_coins):
-        slug = resolve_slug(coin, slug_map)
-        
-        tag = f"[{i+1}/{len(distinct_coins)}]"
-        
-        if slug is None:
-            print(f"{tag} {coin} -> [SKIP] no slug")
-            sv_data[coin] = None
-            sent_data[coin] = None
-            skipped += 1
+
+    for i, coin in enumerate(coins, 1):
+        slug = resolve_slug(coin, dynamic_map)
+        if not slug:
+            print(f"[{i}/{len(coins)}] {coin} -> [SKIP] no slug")
             continue
-        
-        print(f"{tag} {coin} -> {slug}", end="")
-        
-        # Social Volume
-        sv = fetch_metric(slug, target_date, "social_volume_total")
-        sv_data[coin] = sv
-        
-        # Sentiment Balance (bonus, gratis)
-        sb = fetch_metric(slug, target_date, "sentiment_balance_total")
-        sent_data[coin] = sb
-        
+
+        sv = get_social_volume(coin, target_date, slug)
         if sv is not None:
-            print(f" sv={sv}", end="")
-            found += 1
+            sv_data[coin] = sv
+            print(f"[{i}/{len(coins)}] {coin} -> {slug} sv={sv}")
         else:
-            print(f" sv=None", end="")
-            no_data += 1
-        
-        if sb is not None:
-            print(f" sent={sb:.1f}")
-        else:
-            print(f" sent=None")
-        
-        time.sleep(SLEEP_BETWEEN)
-    
-    print(f"\nDone: {found} found, {skipped} skipped, {no_data} no data")
-    
-    # Adauga coloanele
-    sv_col = f"social_volume_{target_date.replace('-','_')}"
-    sent_col = f"sentiment_{target_date.replace('-','_')}"
-    
+            print(f"[{i}/{len(coins)}] {coin} -> {slug} [NO DATA]")
+
+    # Write to CSV
     df[sv_col] = df['coin_id'].map(sv_data)
-    df[sent_col] = df['coin_id'].map(sent_data)
-    
     df.to_csv(csv_path, index=False)
+
+    found = sum(1 for v in sv_data.values() if v is not None)
+    print(f"\nDone: {found} found, {len(coins) - found} skipped/no data")
     print(f"Saved: {csv_path}")
+
 
 if __name__ == "__main__":
     main()
