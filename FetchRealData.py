@@ -3,12 +3,6 @@ FetchRealData.py
 ────────────────
 Fetches REAL market prices (CoinGecko) and REAL social volume (Santiment)
 for dates that were predicted, then builds comparison files in real_predictions/.
-
-Columns per day CSV:
-  timestamp_utc, coin_id,
-  predicted_price, real_price, price_diff, price_diff_pct,
-  predicted_social, real_social, social_diff, social_diff_pct,
-  pred_std_error
 """
 
 import requests
@@ -16,6 +10,7 @@ import os
 import sys
 import time
 import subprocess
+import hashlib
 import pandas as pd
 import numpy as np
 import glob
@@ -41,7 +36,7 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 PRED_DIR   = os.path.join(BASE_DIR, "predicted_hourly")
 OUTPUT_DIR = os.path.join(BASE_DIR, "real_predictions")
 
-# ── proxy helpers (same as FetchPrevData) ────────────────────────────────────
+# ── proxy helpers ────────────────────────────────────────────────────────────
 
 def load_proxies():
     if not os.path.exists(PROXIES_HOME):
@@ -60,28 +55,77 @@ def refresh_proxies():
     print(f"[PROXY-REFRESH] Reloaded {len(new)} proxies.\n")
     return new
 
-def fetch_json(url, params, proxy_url=None, timeout=4):
+def fetch_json_raw(url, params, proxy_url=None, timeout=4):
     try:
         kw = dict(params=params, timeout=timeout)
         if proxy_url:
             kw["proxies"] = {"http": proxy_url, "https": proxy_url}
         r = requests.get(url, **kw)
         r.raise_for_status()
-        return r.json()
+        return r.json(), r.text
     except:
-        return None
+        return None, None
 
-def fetch_coin_day(coin_id, date_str, proxy_url=None):
+def validate_coingecko_response(data, raw_text, date_str, coin_id, proxy_fingerprints, proxy_url):
+    """
+    Validate CoinGecko response is genuine, not cached/rate-limited/wrong-date.
+    Returns (prices, volumes, error_reason).
+    """
+    if data is None:
+        return None, None, "network_fail"
+
+    # 1. CoinGecko error wrapped in 200
+    if isinstance(data, dict) and "status" in data:
+        status = data["status"]
+        if isinstance(status, dict):
+            code = status.get("error_code", 0)
+            msg = status.get("error_message", "")
+            if code == 429 or "rate" in str(msg).lower():
+                return None, None, "rate_limited"
+            if code >= 400:
+                return None, None, f"api_error_{code}"
+
+    # 2. Must have prices
+    prices = data.get("prices", [])
+    volumes = data.get("total_volumes", [])
+    if not prices:
+        return None, None, "no_prices"
+
+    # 3. Timestamps must match requested date
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    day_start_ms = int((date_obj - timedelta(days=1)).timestamp()) * 1000
+    day_end_ms = int((date_obj + timedelta(days=2)).timestamp()) * 1000
+
+    first_ts = prices[0][0]
+    last_ts = prices[-1][0]
+    if first_ts < day_start_ms or last_ts > day_end_ms:
+        got_date = datetime.fromtimestamp(first_ts/1000, tz=timezone.utc).strftime('%Y-%m-%d')
+        return None, None, f"wrong_date(got {got_date})"
+
+    # 4. Detect cached proxy — same data for different coin
+    if proxy_url:
+        fingerprint = hashlib.md5(str(prices[:5]).encode()).hexdigest()
+        key = proxy_url
+        if key in proxy_fingerprints:
+            last_coin, last_fp = proxy_fingerprints[key]
+            if last_fp == fingerprint and last_coin != coin_id:
+                return None, None, f"cached(same as {last_coin})"
+        proxy_fingerprints[key] = (coin_id, fingerprint)
+
+    return prices, volumes, None
+
+def fetch_coin_day(coin_id, date_str, proxy_url=None, proxy_fingerprints=None):
+    """Fetch + validate. Returns (prices, volumes, error_reason)."""
     d = datetime.strptime(date_str, "%Y-%m-%d")
     url = f"{COINGECKO_API}/coins/{coin_id}/market_chart/range"
     params = {"vs_currency": "usd", "from": int(d.timestamp()),
               "to": int((d + timedelta(days=1)).timestamp())}
-    data = fetch_json(url, params, proxy_url)
-    if data and data.get("prices"):
-        return data["prices"], data["total_volumes"]
-    return None, None
 
-# ── Santiment social volume ──────────────────────────────────────────────────
+    data, raw = fetch_json_raw(url, params, proxy_url)
+    fp = proxy_fingerprints if proxy_fingerprints else {}
+    return validate_coingecko_response(data, raw, date_str, coin_id, fp, proxy_url)
+
+# ── Santiment ────────────────────────────────────────────────────────────────
 
 _slug_cache = None
 
@@ -108,7 +152,6 @@ def get_slug_map():
         return {}
 
 def fetch_real_social(coin_id, date_str):
-    """Fetch real daily social_volume from Santiment. Returns float or None."""
     if not HAS_SAN:
         return None
     slug_map = get_slug_map()
@@ -137,7 +180,6 @@ def load_predictions():
     if not pred_files:
         print("[ERROR] No prediction files in predicted_hourly/")
         return {}, {}
-
     date_coins, pred_data = {}, {}
     for fp in pred_files:
         bn = os.path.splitext(os.path.basename(fp))[0]
@@ -160,11 +202,16 @@ def run():
     print(f"{border}\n")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Fresh proxies
+    print("[PROXY] Refreshing proxies before fetch...")
+    refresh_proxies()
+
     date_coins, pred_data = load_predictions()
     if not date_coins:
         return
 
-    # ── 1) Fetch real prices via CoinGecko (proxy rotation) ──────────
+    # ── 1) Fetch real prices via CoinGecko ───────────────────────────
     jobs = []
     for d, coins in sorted(date_coins.items()):
         for c in coins:
@@ -175,9 +222,11 @@ def run():
     proxies            = load_proxies()
     prx_i              = 0
     proxy_refresh_time = time.time()
+    proxy_coin_count   = 0
+    proxy_fingerprints = {}
     last_ip_time       = 0.0
     ip_count           = 0
-    real_prices        = {}   # (date, coin) → (prices, volumes)
+    real_prices        = {}
     failed             = set()
     retry_q            = deque()
     main_q             = deque(jobs)
@@ -186,10 +235,11 @@ def run():
         return prx_i >= len(proxies) or (time.time() - proxy_refresh_time >= PROXY_REFRESH_INTERVAL)
 
     def do_refresh():
-        nonlocal proxies, prx_i, proxy_refresh_time
+        nonlocal proxies, prx_i, proxy_refresh_time, proxy_fingerprints
         proxies = refresh_proxies()
         prx_i = 0
         proxy_refresh_time = time.time()
+        proxy_fingerprints.clear()
 
     def ip_ready():
         return (time.time() - last_ip_time) >= IP_COOLDOWN or last_ip_time == 0.0
@@ -197,36 +247,62 @@ def run():
     def try_ip(d, c):
         nonlocal last_ip_time, ip_count
         print(f"    {c}({d}) | MY_IP...", end="", flush=True)
-        p, v = fetch_coin_day(c, d)
+        prices, volumes, err = fetch_coin_day(c, d, proxy_fingerprints={})
         last_ip_time = time.time()
         ip_count += 1
-        if p:
-            print(f" OK ({len(p)}pts)")
-            real_prices[(d, c)] = (p, v)
+        if prices:
+            sample = prices[0][1]
+            print(f" OK ({len(prices)}pts, ${sample:.4f})")
+            real_prices[(d, c)] = (prices, volumes)
             return True
-        print(" FAIL")
+        print(f" FAIL ({err})")
         return False
 
     def try_proxy(d, c):
-        nonlocal prx_i
+        nonlocal prx_i, proxy_coin_count
         tries = 0
         while tries < MAX_PRX_TRIES_PER_COIN:
             if needs_refresh():
                 do_refresh()
+                proxy_coin_count = 0
             if prx_i >= len(proxies):
                 break
+
+            # Rotate after BATCH_SIZE successful fetches
+            if proxy_coin_count >= BATCH_SIZE:
+                prx_i += 1
+                proxy_coin_count = 0
+                proxy_fingerprints.pop(proxies[prx_i-1] if prx_i-1 < len(proxies) else "", None)
+                if prx_i >= len(proxies):
+                    do_refresh()
+                print(f"    [ROTATE] Done {BATCH_SIZE} on proxy, next #{prx_i+1}")
+                continue
+
             px = proxies[prx_i]
             print(f"    [TRY] #{prx_i+1}: {px}...", end="", flush=True)
-            p, v = fetch_coin_day(c, d, px)
-            if p:
-                print(f" OK ({len(p)}pts)")
-                real_prices[(d, c)] = (p, v)
+            prices, volumes, err = fetch_coin_day(c, d, px, proxy_fingerprints)
+
+            if prices:
+                sample = prices[0][1]
+                print(f" OK ({len(prices)}pts, ${sample:.4f})")
+                real_prices[(d, c)] = (prices, volumes)
+                proxy_coin_count += 1
                 return True
-            print(" FAIL")
-            prx_i += 1
-            tries += 1
+            else:
+                reason = err or "unknown"
+                print(f" FAIL ({reason})")
+                if reason.startswith("cached") or reason == "rate_limited":
+                    # Proxy is burnt, skip it immediately
+                    prx_i += 1
+                    proxy_coin_count = 0
+                    proxy_fingerprints.pop(px, None)
+                else:
+                    prx_i += 1
+                    proxy_coin_count = 0
+                    tries += 1
         return False
 
+    # ── fetch loop ───────────────────────────────────────────────────
     total = len(main_q)
     num   = 0
     mode  = "ip"
@@ -235,21 +311,31 @@ def run():
     while main_q or retry_q:
         if mode == "proxy" and needs_refresh():
             do_refresh()
+            proxy_coin_count = 0
+
         if mode == "ip" and ip_count >= BATCH_SIZE:
-            mode = "proxy"; ip_count = 0
+            mode = "proxy"; ip_count = 0; proxy_coin_count = 0
+            print(f"[SWITCH] Done {BATCH_SIZE} on MY_IP -> PROXY #{prx_i+1}")
+
         if mode == "proxy" and ip_ready():
             mode = "ip"; ip_count = 0
+            if retry_q:
+                print(f"[SWITCH] IP cooldown OK -> MY_IP  (retry queue: {len(retry_q)})")
+            else:
+                print(f"[SWITCH] IP cooldown OK -> MY_IP")
 
         if mode == "ip":
             while retry_q and ip_count < BATCH_SIZE:
                 d, c = retry_q.popleft()
+                print(f"[RETRY] {c}({d})", end="")
                 if not try_ip(d, c):
                     failed.add((d, c))
+                    print(f"    [DROP] {c}({d})")
                 time.sleep(0.3)
             while main_q and ip_count < BATCH_SIZE:
                 d, c = main_q.popleft()
                 num += 1
-                print(f"[{num}/{total}]", end="")
+                print(f"[{num}/{total}] {c}({d})", end="")
                 if not try_ip(d, c):
                     retry_q.append((d, c))
                 time.sleep(0.3)
@@ -266,21 +352,23 @@ def run():
                 print(f"[{num}/{total}] {c}({d})")
                 if not try_proxy(d, c):
                     retry_q.append((d, c))
+                    print(f"    [QUEUE] {c}({d}) -> retry queue")
                 time.sleep(0.3)
             else:
                 wait = IP_COOLDOWN - (time.time() - last_ip_time)
                 if wait > 0:
                     time.sleep(min(wait, 10))
 
-    # ── 2) Fetch real social volume via Santiment ────────────────────
-    # one value per (date, coin) — Santiment gives daily aggregates
-    real_social = {}   # (date, coin) → float
+    print(f"\n[PRICES DONE] {len(real_prices)} OK, {len(failed)} failed\n")
+
+    # ── 2) Fetch real social volume ──────────────────────────────────
+    real_social = {}
     if HAS_SAN:
         unique_pairs = set()
         for d, coins in date_coins.items():
             for c in coins:
                 unique_pairs.add((d, c))
-        print(f"\n[SOCIAL] Fetching real social_volume for {len(unique_pairs)} coin-day pairs...")
+        print(f"[SOCIAL] Fetching real social_volume for {len(unique_pairs)} coin-day pairs...")
         for i, (d, c) in enumerate(sorted(unique_pairs), 1):
             sv = fetch_real_social(c, d)
             if sv is not None:
@@ -288,8 +376,6 @@ def run():
                 print(f"  [{i}] {c}({d}) sv={sv}")
             else:
                 print(f"  [{i}] {c}({d}) [SKIP]")
-    else:
-        print("\n[SOCIAL] Skipped (san not installed)")
 
     # ── 3) Build comparison CSVs ─────────────────────────────────────
     print(f"\n[COMPARE] Building comparison files...")
@@ -303,7 +389,7 @@ def run():
             pred_error  = prow.get('error', np.nan)
             pred_social = prow.get('predicted_social_volume', np.nan)
 
-            # ── real price match ──
+            # Real price match
             real_price_val = np.nan
             key = (date_str, coin_id)
             if key in real_prices:
@@ -317,10 +403,10 @@ def run():
                     idx = (rdf['ts'] - ts_aware).abs().idxmin()
                     real_price_val = rdf.loc[idx, 'price']
 
-            # ── real social match ──
+            # Real social match
             real_social_val = real_social.get((date_str, coin_id), np.nan)
 
-            # ── diffs ──
+            # Diffs
             p_diff = (real_price_val - pred_price) if not np.isnan(real_price_val) else np.nan
             p_diff_pct = (p_diff / pred_price * 100) if (not np.isnan(p_diff) and pred_price != 0) else np.nan
 
@@ -364,9 +450,6 @@ def run():
                 avg_real_price=('real_price', 'mean'),
                 avg_price_error_pct=('price_diff_pct', 'mean'),
                 max_price_error_pct=('price_diff_pct', lambda x: x.abs().max()),
-                avg_predicted_social=('predicted_social', 'mean'),
-                avg_real_social=('real_social', 'mean'),
-                avg_social_error_pct=('social_diff_pct', 'mean'),
                 num_hours=('coin_id', 'count')
             ).round(4).reset_index()
             summary.to_csv(os.path.join(OUTPUT_DIR, "comparison_summary.csv"), index=False)
