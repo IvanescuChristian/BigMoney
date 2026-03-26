@@ -1,0 +1,112 @@
+﻿>>> Loading comparison data from real_predictions/...
+    Loaded 9408 total rows, 9336 with real price data
+    Coins: 56
+    Dates: ['2025-05-24', '2025-05-25', '2025-05-26', '2025-05-27', '2025-05-28', '2025-05-29', '2025-05-30', '2025-05-31']
+
+>>> [1/5] Analyzing price accuracy...
+>>> [2/5] Analyzing direction accuracy...
+>>> [3/5] Analyzing social volume accuracy...
+  [INFO] No social volume comparison data available.
+>>> [4/5] Analyzing error vs horizon...
+>>> [5/5] Building debug file...
+    Debug file: 9336 rows
+
+========================================================================
+  PREDICTION vs REALITY ù FULL ANALYSIS REPORT
+========================================================================
+
+  Data: 56 coins | 9336 total hour-predictions
+
+------------------------------------------------------------------------
+  1. PRICE ACCURACY
+------------------------------------------------------------------------
+     Average MAE:  9.73%
+     Median MAE:   3.62%
+     Best coin:    blackrock-usd-institutional-digital-liquidity-fund (MAE 0.00%)
+     Worst coin:   ondo-finance (MAE 61.83%)
+
+     Accuracy tiers:
+       < 1% error:   10 coins  (18%)
+       1-5% error:   24 coins  (43%)
+       5-10% error:  7 coins  (12%)
+       > 10% error:  15 coins  (27%)
+
+     Worst offenders (>10% error):
+       zcash                          MAE=11.68%  Bias=+11.68%
+       bittensor                      MAE=12.42%  Bias=-12.42%
+       pepe                           MAE=13.05%  Bias=+11.86%
+       near                           MAE=14.33%  Bias=-14.33%
+       jito-staked-sol                MAE=14.96%  Bias=-14.96%
+       aptos                          MAE=15.85%  Bias=-15.85%
+       aave                           MAE=21.81%  Bias=+21.81%
+       ethereum                       MAE=24.57%  Bias=+24.48%
+       kaspa                          MAE=28.22%  Bias=-28.22%
+       pi-network                     MAE=31.67%  Bias=+31.67%
+       ethereum-classic               MAE=37.94%  Bias=+37.94%
+       staked-ether                   MAE=44.27%  Bias=+44.27%
+       wrapped-steth                  MAE=45.66%  Bias=+45.66%
+       internet-computer              MAE=47.65%  Bias=+47.65%
+       ondo-finance                   MAE=61.83%  Bias=+61.83%
+
+------------------------------------------------------------------------
+  2. DIRECTION ACCURACY (hourly UP/DOWN)
+------------------------------------------------------------------------
+     Overall: 3899/9280 = 42.0%
+     (random would be ~33%, >50% is useful)
+
+     7-day trend direction (UP/DOWN over full period):
+     Correct: 29/56 = 51.8%
+
+     Top 5 directional coins:
+       pepe                           91.6%
+       shiba-inu                      85.0%
+       polkadot                       50.9%
+       usds                           47.9%
+       avalanche-2                    46.1%
+
+     Bottom 5 directional coins:
+       ethena-usde                    37.1%
+       pi-network                     35.3%
+       crypto-com-chain               28.7%
+       hashnote-usyc                  13.7%
+       blackrock-usd-institutional-digital-liquidity-fund 2.4%
+
+------------------------------------------------------------------------
+  3. SOCIAL VOLUME ACCURACY
+------------------------------------------------------------------------
+     No social comparison data. Run FetchRealData.py with Santiment.
+
+------------------------------------------------------------------------
+  4. ERROR GROWTH OVER TIME
+------------------------------------------------------------------------
+     1-6h         MAE=7.91%  Median=0.93%  Bias=+4.410%  Max=73.27%  N=336
+     7-24h        MAE=8.54%  Median=2.14%  Bias=+3.888%  Max=72.98%  N=1008
+     25-48h       MAE=9.31%  Median=2.08%  Bias=+5.917%  Max=72.36%  N=1344
+     49-96h       MAE=9.66%  Median=2.25%  Bias=+6.128%  Max=71.58%  N=2688
+     97-168h      MAE=10.53%  Median=4.56%  Bias=+2.623%  Max=69.36%  N=3960
+
+------------------------------------------------------------------------
+  5. 7-DAY PREDICTION SUMMARY vs REALITY
+------------------------------------------------------------------------
+     Coin                            Pred%    Real%    Trend     MAE%
+python : Traceback (most recent call last):
+At line:1 char:1
++ python ErrorAnalysis.py 2>&1 | Out-File -Encoding utf8 analysis_outpu ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteExceptio 
+   n
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "D:\Python projects\Proiect Pclp3\ErrorAnalysis.py", line 506, in <module>
+    run()
+    ~~~^^
+  File "D:\Python projects\Proiect Pclp3\ErrorAnalysis.py", line 502, in run
+    print_report(price_report, dir_report, social_report, horizon_report, summary_df, df)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Python projects\Proiect Pclp3\ErrorAnalysis.py", line 397, in print_report
+    print(f"     {'\u2500'*28} {'\u2500'*8} {'\u2500'*8} {'\u2500'*8} {'\u2500'*8}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 5-32: character maps to <undefined>

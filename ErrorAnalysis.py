@@ -6,11 +6,11 @@ Run AFTER FetchRealData.py.
 
 Outputs:
   error_analysis/
-    ├── per_coin_report.csv      — accuracy per coin
-    ├── direction_report.csv     — UP/DOWN/FLAT hit rate per coin
-    ├── horizon_decay.csv        — error growth over time
-    ├── social_accuracy.csv      — social volume prediction quality
-    └── full_debug.csv           — every hour, predicted vs real (for manual inspection)
+    ├── per_coin_report.csv      -- accuracy per coin
+    ├── direction_report.csv     -- UP/DOWN/FLAT hit rate per coin
+    ├── horizon_decay.csv        -- error growth over time
+    ├── social_accuracy.csv      -- social volume prediction quality
+    └── full_debug.csv           -- every hour, predicted vs real (for manual inspection)
 
 Usage:  python ErrorAnalysis.py
 """
@@ -287,7 +287,7 @@ def print_report(price_df, dir_df, social_df, horizon_df, summary_df, raw_df):
     line   = "-" * 72
 
     print(f"\n{border}")
-    print("  PREDICTION vs REALITY — FULL ANALYSIS REPORT")
+    print("  PREDICTION vs REALITY -- FULL ANALYSIS REPORT")
     print(f"{border}")
 
     # ── OVERALL NUMBERS ──────────────────────────────────────────────
@@ -394,7 +394,7 @@ def print_report(price_df, dir_df, social_df, horizon_df, summary_df, raw_df):
         print(f"  5. 7-DAY PREDICTION SUMMARY vs REALITY")
         print(f"{line}")
         print(f"     {'Coin':<28} {'Pred%':>8} {'Real%':>8} {'Trend':>8} {'MAE%':>8}")
-        print(f"     {'─'*28} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
+        print(f"     {'-'*28} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
 
         merged = summary_df.merge(price_df[['coin_id', 'first_real', 'last_real', 'trend_correct', 'mae_pct']],
                                    on='coin_id', how='left')
@@ -438,11 +438,11 @@ def print_report(price_df, dir_df, social_df, horizon_df, summary_df, raw_df):
 
         print(f"\n     TRADING READINESS: {score}/4")
         if score >= 3:
-            print("     → CAUTIOUS GO — apply correction factors, paper trade first")
+            print("     -> CAUTIOUS GO -- apply correction factors, paper trade first")
         elif score >= 2:
-            print("     → NEEDS WORK — model shows promise but needs tuning")
+            print("     -> NEEDS WORK -- model shows promise but needs tuning")
         else:
-            print("     → NOT READY — significant improvements needed")
+            print("     -> NOT READY -- significant improvements needed")
 
     print(f"\n  Files saved in: {OUTPUT_DIR}/")
     print(f"{border}\n")
