@@ -310,13 +310,18 @@ def run_prediction():
 
             base_preds = price_model.predict(inp)
 
-            # MAGNITUDE-SCALED noise:
-            # Instead of arbitrary 0.05, use predicted magnitude
-            # This makes big-move periods actually produce big predictions
+            # MAGNITUDE-SCALED noise with safety caps:
+            # 1. Cap magnitude at 2% per hour (no coin moves 50% in 1 hour normally)
+            # 2. Use ANCHOR price for noise scale, not current (prevents compounding)
+            # 3. Clamp final price to +-50% of starting price
             drift_array = np.full(NUM_SIMULATIONS, historical_drift)
-            noise_scale = np.maximum(expected_magnitude, volat_vec) * base_preds
-            noise = np.random.normal(drift_array, noise_scale)
+            capped_mag = min(expected_magnitude, 0.02)  # max 2% per hour
+            anchor_price = base_hist[-1]  # starting price, constant
+            noise_scale = capped_mag * anchor_price  # fixed scale, no compounding
+            noise = np.random.normal(drift_array, max(noise_scale, 1e-9))
             final_preds = np.maximum(base_preds + noise, 1e-9)
+            # Clamp to +-50% of starting price to prevent runaway
+            final_preds = np.clip(final_preds, anchor_price * 0.5, anchor_price * 1.5)
 
             mean_price = np.mean(final_preds)
             std_error = np.std(final_preds)
