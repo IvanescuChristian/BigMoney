@@ -17,10 +17,9 @@ NUM_SIMULATIONS = 50
 PRICE_FEATURES = ['total_volume_usd', 'social_volume', 'hourly_increase', 'price-pop',
                    'price-soc correlation', 'RSI', 'volatility']
 
-SOCIAL_FEATURES = ['social_lag_1', 'social_lag_24', 'price_pct', 'total_volume_usd',
-                    'RSI', 'volatility', 'hour', 'day_of_week']
+SOCIAL_FEATURES = ['social_lag_1d', 'social_lag_7d', 'social_avg_7d',
+                    'price_pct_1d', 'volume_avg', 'day_of_week']
 
-# Magnitude model: predicts abs(hourly_pct_change) — "how big will the move be?"
 MAGNITUDE_FEATURES = ['volatility', 'RSI', 'social_volume', 'total_volume_usd',
                        'abs_change_lag1', 'abs_change_lag24', 'hour', 'day_of_week']
 
@@ -60,7 +59,7 @@ def load_all_historical_data():
     return full_df.sort_values(['coin_id', 'timestamp_utc'])
 
 
-# ── dynamic indicators for Monte Carlo ──────────────────────────────────────
+# -- dynamic indicators for Monte Carlo --
 
 def get_dynamic_rsi(prices_matrix, period=14):
     if prices_matrix.shape[1] < period + 1:
@@ -82,71 +81,105 @@ def get_dynamic_volat(prices_matrix, period=24):
     return np.nan_to_num(np.std(rets, axis=1), nan=0.0, posinf=0.0, neginf=0.0)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  STAGE 1: Social Volume Prediction
-# ═══════════════════════════════════════════════════════════════════════════
+# =========================================================================
+#  STAGE 1: Social Volume Prediction (DAILY, not hourly)
+# =========================================================================
 
 def train_social_model(c_df):
+    """Train on DAILY social volume. Social is a daily metric, not hourly."""
     sdf = c_df.copy()
-    sdf['social_lag_1'] = sdf['social_volume'].shift(1)
-    sdf['social_lag_24'] = sdf['social_volume'].shift(24)
-    sdf['price_pct'] = sdf['price_usd'].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
-    sdf['hour'] = sdf['timestamp_utc'].dt.hour
-    sdf['day_of_week'] = sdf['timestamp_utc'].dt.dayofweek
-    sdf = sdf.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    sdf['date'] = sdf['timestamp_utc'].dt.date
 
-    if len(sdf) < 50:
-        return None
+    # Aggregate to daily
+    daily = sdf.groupby('date').agg(
+        social_volume=('social_volume', 'first'),
+        price_start=('price_usd', 'first'),
+        price_end=('price_usd', 'last'),
+        volume_avg=('total_volume_usd', 'mean')
+    ).reset_index().sort_values('date')
 
-    X = sdf[SOCIAL_FEATURES]
-    y = sdf['social_volume']
+    # Daily features
+    daily['social_lag_1d'] = daily['social_volume'].shift(1)
+    daily['social_lag_7d'] = daily['social_volume'].shift(7)
+    daily['social_avg_7d'] = daily['social_volume'].rolling(7, min_periods=1).mean()
+    daily['price_pct_1d'] = daily['price_end'].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
+    daily['day_of_week'] = pd.to_datetime(daily['date']).dt.dayofweek
+    daily = daily.replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
-    model = xgb.XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, n_jobs=-1)
+    if len(daily) < 10:
+        return None, daily
+
+    X = daily[SOCIAL_FEATURES]
+    y = daily['social_volume']
+
+    model = xgb.XGBRegressor(
+        n_estimators=100, learning_rate=0.05, max_depth=3,
+        reg_alpha=1.0, reg_lambda=2.0,
+        n_jobs=-1
+    )
     try:
         model.fit(X, y)
-        return model
+        return model, daily
     except:
-        return None
+        return None, daily
 
 
-def predict_social_series(social_model, c_df, horizon=HORIZON):
-    if social_model is None:
-        last_soc = c_df['social_volume'].iloc[-1]
+def predict_social_series(social_result, c_df, horizon=HORIZON):
+    """Predict daily social volume for 7 days, expand to hourly."""
+    # Handle None or invalid result
+    if social_result is None:
+        last_soc = max(float(c_df['social_volume'].iloc[-1]), 0.0)
         return [last_soc] * horizon
 
-    social_hist = list(c_df['social_volume'].tail(24).values)
-    last_vol = c_df['total_volume_usd'].iloc[-1]
-    last_rsi = c_df['RSI'].iloc[-1]
-    last_volat = c_df['volatility'].iloc[-1]
-    last_ts = c_df['timestamp_utc'].iloc[-1]
+    social_model, daily = social_result
 
-    predicted = []
-    for h in range(horizon):
-        t_curr = last_ts + timedelta(hours=h + 1)
-        s_lag_1 = social_hist[-1]
-        s_lag_24 = social_hist[-24] if len(social_hist) >= 24 else social_hist[0]
+    if social_model is None:
+        median_soc = max(float(daily['social_volume'].tail(7).median()), 0.0)
+        return [median_soc] * horizon
+
+    # Historical stats for clamping
+    hist_median = float(daily['social_volume'].median())
+    hist_max = float(daily['social_volume'].max())
+    clamp_max = max(hist_max * 1.5, hist_median * 3, 1.0)
+
+    last_ts = c_df['timestamp_utc'].iloc[-1]
+    social_hist = list(daily['social_volume'].tail(7).values)
+    last_vol_avg = float(daily['volume_avg'].iloc[-1])
+    last_price_pct = float(daily['price_pct_1d'].iloc[-1])
+
+    num_days = (horizon + 23) // 24
+    daily_preds = []
+
+    for d in range(num_days):
+        t_day = last_ts + timedelta(days=d + 1)
+        lag_1d = social_hist[-1]
+        lag_7d = social_hist[-7] if len(social_hist) >= 7 else social_hist[0]
+        avg_7d = float(np.mean(social_hist[-7:]))
 
         inp = pd.DataFrame([{
-            'social_lag_1': s_lag_1,
-            'social_lag_24': s_lag_24,
-            'price_pct': 0.0,
-            'total_volume_usd': last_vol,
-            'RSI': last_rsi,
-            'volatility': last_volat,
-            'hour': t_curr.hour,
-            'day_of_week': t_curr.dayofweek
+            'social_lag_1d': lag_1d,
+            'social_lag_7d': lag_7d,
+            'social_avg_7d': avg_7d,
+            'price_pct_1d': last_price_pct,
+            'volume_avg': last_vol_avg,
+            'day_of_week': t_day.weekday()
         }])
 
         pred_soc = max(float(social_model.predict(inp)[0]), 0.0)
-        predicted.append(pred_soc)
+        pred_soc = min(pred_soc, clamp_max)
+        daily_preds.append(pred_soc)
         social_hist.append(pred_soc)
 
-    return predicted
+    # Expand daily -> hourly
+    hourly_preds = []
+    for dv in daily_preds:
+        hourly_preds.extend([dv] * 24)
+    return hourly_preds[:horizon]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  STAGE 2: Magnitude Prediction — "how big will the move be?"
-# ═══════════════════════════════════════════════════════════════════════════
+# =========================================================================
+#  STAGE 2: Magnitude Prediction
+# =========================================================================
 
 def train_magnitude_model(c_df):
     """Train model to predict abs(hourly_pct_change)."""
@@ -184,7 +217,6 @@ def predict_magnitude_series(mag_model, c_df, social_preds, avg_mag, horizon=HOR
     last_volat = c_df['volatility'].iloc[-1]
     last_ts = c_df['timestamp_utc'].iloc[-1]
 
-    # Recent magnitude history
     pct_changes = c_df['price_usd'].pct_change().abs().fillna(0)
     mag_hist = list(pct_changes.tail(24).values)
 
@@ -205,16 +237,16 @@ def predict_magnitude_series(mag_model, c_df, social_preds, avg_mag, horizon=HOR
             'day_of_week': t_curr.dayofweek
         }])
 
-        pred_mag = max(float(mag_model.predict(inp)[0]), 0.0005)  # min 0.05%
+        pred_mag = max(float(mag_model.predict(inp)[0]), 0.0005)
         predicted.append(pred_mag)
         mag_hist.append(pred_mag)
 
     return predicted
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  STAGE 3: Price Prediction with magnitude-scaled Monte Carlo
-# ═══════════════════════════════════════════════════════════════════════════
+# =========================================================================
+#  STAGE 3: Price Prediction with Monte Carlo
+# =========================================================================
 
 def run_prediction():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -227,7 +259,7 @@ def run_prediction():
     all_results = []
     summary_results = []
 
-    print(f"\n>>> [2] STAGE 1: Social volume prediction")
+    print(f"\n>>> [2] STAGE 1: Social volume prediction (daily model)")
     print(f">>> [3] STAGE 2: Magnitude prediction (abs move size)")
     print(f">>> [4] STAGE 3: Price prediction (Monte Carlo)")
     print(f">>>     {len(coins)} monede | {HORIZON}h orizont | {NUM_SIMULATIONS} simulari\n")
@@ -239,24 +271,26 @@ def run_prediction():
 
         train_data = c_df.replace([np.inf, -np.inf], 0.0).fillna(0.0)
         if len(train_data) < 50:
-            print(f"    ! Skip {coin} — not enough data ({len(train_data)} rows)")
+            print(f"    ! Skip {coin} -- not enough data ({len(train_data)} rows)")
             continue
 
-        # ── Stage 1: Social ──────────────────────────────────────────
-        social_model = train_social_model(c_df)
-        social_preds = predict_social_series(social_model, c_df, HORIZON)
-        soc_tag = "XGB" if social_model else "FLAT"
+        # -- Stage 1: Social (DAILY) --
+        social_result = train_social_model(c_df)
+        social_model_obj = social_result[0] if social_result[0] is not None else None
+        social_preds = predict_social_series(social_result, c_df, HORIZON)
+        soc_tag = "XGB" if social_model_obj is not None else "MED"
 
-        # ── Stage 2: Magnitude ───────────────────────────────────────
+        # -- Stage 2: Magnitude --
         mag_model, avg_mag = train_magnitude_model(c_df)
         mag_preds = predict_magnitude_series(mag_model, c_df, social_preds, avg_mag, HORIZON)
         mag_tag = "XGB" if mag_model else "AVG"
-        avg_pred_mag = np.mean(mag_preds) * 100  # as percentage
+        avg_pred_mag = np.mean(mag_preds) * 100
+        avg_pred_soc = np.mean(social_preds)
 
-        print(f"    -> {coin:<30} soc={soc_tag} mag={mag_tag}({avg_pred_mag:.2f}%) "
-              f"train={len(train_data)}h  ", end="")
+        print(f"    -> {coin:<30} soc={soc_tag}({avg_pred_soc:.1f}) "
+              f"mag={mag_tag}({avg_pred_mag:.2f}%) train={len(train_data)}h  ", end="")
 
-        # ── Stage 3: Price ───────────────────────────────────────────
+        # -- Stage 3: Price --
         X_cols = PRICE_FEATURES + ['lag_1', 'lag_24']
         X = train_data[X_cols]
         y = train_data['price_usd']
@@ -286,7 +320,7 @@ def run_prediction():
             t_curr += timedelta(hours=1)
 
             s_soc = social_preds[h]
-            expected_magnitude = mag_preds[h]  # abs(pct_change) expected
+            expected_magnitude = mag_preds[h]
 
             l1 = price_mat[:, -1]
             l24 = price_mat[:, -24] if price_mat.shape[1] >= 24 else price_mat[:, 0]
@@ -310,17 +344,13 @@ def run_prediction():
 
             base_preds = price_model.predict(inp)
 
-            # MAGNITUDE-SCALED noise with safety caps:
-            # 1. Cap magnitude at 2% per hour (no coin moves 50% in 1 hour normally)
-            # 2. Use ANCHOR price for noise scale, not current (prevents compounding)
-            # 3. Clamp final price to +-50% of starting price
+            # MAGNITUDE-SCALED noise with safety caps
             drift_array = np.full(NUM_SIMULATIONS, historical_drift)
-            capped_mag = min(expected_magnitude, 0.02)  # max 2% per hour
-            anchor_price = base_hist[-1]  # starting price, constant
-            noise_scale = capped_mag * anchor_price  # fixed scale, no compounding
+            capped_mag = min(expected_magnitude, 0.02)
+            anchor_price = base_hist[-1]
+            noise_scale = capped_mag * anchor_price
             noise = np.random.normal(drift_array, max(noise_scale, 1e-9))
             final_preds = np.maximum(base_preds + noise, 1e-9)
-            # Clamp to +-50% of starting price to prevent runaway
             final_preds = np.clip(final_preds, anchor_price * 0.5, anchor_price * 1.5)
 
             mean_price = np.mean(final_preds)
@@ -352,7 +382,7 @@ def run_prediction():
             'start_prediction_usd': start_price,
             'end_prediction_usd': end_price,
             'predicted_change_%': round(pct_change, 2),
-            'avg_predicted_social': round(np.mean(social_preds), 2),
+            'avg_predicted_social': round(avg_pred_soc, 2),
             'avg_predicted_magnitude_%': round(avg_pred_mag, 3)
         })
 
@@ -361,7 +391,7 @@ def run_prediction():
     if not all_results:
         return
 
-    # ── Export ────────────────────────────────────────────────────────
+    # -- Export --
     res_df = pd.DataFrame(all_results)
     res_df['d_str'] = res_df['timestamp_utc'].dt.strftime('%Y-%m-%d')
 
