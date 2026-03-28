@@ -72,9 +72,14 @@ def run():
             pred_df = pd.read_csv(fp)
             real_df = real_prices[date_str]
 
-            # Merge on timestamp + coin_id
-            pred_df['timestamp_utc'] = pd.to_datetime(pred_df['timestamp_utc'])
-            real_df['timestamp_utc'] = pd.to_datetime(real_df['timestamp_utc'])
+            # Round both to nearest hour to ensure matching
+            pred_df['timestamp_utc'] = pd.to_datetime(pred_df['timestamp_utc']).dt.round('h')
+            real_df = real_df.copy()
+            real_df['timestamp_utc'] = pd.to_datetime(real_df['timestamp_utc']).dt.round('h')
+
+            # Drop duplicates after rounding (keep last)
+            pred_df = pred_df.drop_duplicates(subset=['timestamp_utc', 'coin_id'], keep='last')
+            real_df = real_df.drop_duplicates(subset=['timestamp_utc', 'coin_id'], keep='last')
 
             merged = pred_df.merge(real_df, on=['timestamp_utc', 'coin_id'], how='left')
 
